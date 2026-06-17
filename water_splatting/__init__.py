@@ -4,6 +4,9 @@ from .project_gaussians import project_gaussians
 from .rasterize import rasterize_gaussians
 from ._torch_impl import project_gaussians_forward, rasterize_gaussians_forward
 from .water_splatting import WaterSplattingModel
+
+from .hash_water_splatting import HashWaterSplattingModel
+
 from .utils import (
     map_gaussian_to_intersects,
     bin_and_sort_gaussians,
@@ -24,6 +27,7 @@ __all__ = [
     "project_gaussians_forward",
     "rasterize_gaussians_forward",
     "WaterSplattingModel",
+    "HashWaterSplattingModel",
     # utils
     "bin_and_sort_gaussians",
     "compute_cumulative_intersects",

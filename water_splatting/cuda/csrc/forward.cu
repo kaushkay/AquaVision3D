@@ -283,26 +283,41 @@ __global__ void nd_rasterize_forward(
             const float vis = alpha * T;
             #pragma unroll
             for (int c = 0; c < channels; ++c) {
-                const float exp_obj = __expf(-medium_attn[channels * pix_id + c] * depth);
-                const float exp_bs = __expf(-medium_bs[channels * pix_id + c] * depth);
-                pix_out[c] = __hadd(pix_out[c], __float2half((exp_obj * colors[channels * g + c] + exp_bs * medium_rgb[channels * pix_id + c]) * vis));
+                // Index medium by Gaussian g, not pixel pix_id
+                const float exp_obj = __expf(-medium_attn[channels * g + c] * depth);
+                const float exp_bs  = __expf(-medium_bs[channels * g + c] * depth);
+                pix_out[c] = __hadd(
+                    pix_out[c],
+                    __float2half(
+                        (exp_obj * colors[channels * g + c]
+                        + exp_bs * medium_rgb[channels * g + c]) * vis
+                    )
+                );
             }
             T = next_T;
             cur_idx = batch_start + t;
         }
     }
 
-    if (inside) {
-        // add background
-        final_Ts[pix_id] = T; // transmittance at last gaussian in this pixel
-        final_index[pix_id] = cur_idx; // index of in bin of last gaussian in this pixel
+    // if (inside) {
+    //     // add background
+    //     final_Ts[pix_id] = T; // transmittance at last gaussian in this pixel
+    //     final_index[pix_id] = cur_idx; // index of in bin of last gaussian in this pixel
 
-        // add medium scattering
-        #pragma unroll
-        for (int c = 0; c < channels; ++c) {
-            out_img[pix_id * channels + c] = __half2float(pix_out[c]) + T * medium_rgb[pix_id * channels + c];
-        }
-        // add background
+    //     // add medium scattering
+    //     #pragma unroll
+    //     for (int c = 0; c < channels; ++c) {
+    //         out_img[pix_id * channels + c] = __half2float(pix_out[c]) + T * medium_rgb[pix_id * channels + c];
+    //     }
+    //     // add background
+    //     #pragma unroll
+    //     for (int c = 0; c < channels; ++c) {
+    //         out_img[pix_id * channels + c] = __half2float(pix_out[c]) + T * background[c];
+    //     }
+    // }
+    if (inside) {
+        final_Ts[pix_id] = T;
+        final_index[pix_id] = cur_idx;
         #pragma unroll
         for (int c = 0; c < channels; ++c) {
             out_img[pix_id * channels + c] = __half2float(pix_out[c]) + T * background[c];
@@ -364,6 +379,11 @@ __global__ void rasterize_forward(
     __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
     __shared__ float depth_batch[MAX_BLOCK_SIZE];
 
+    // Per-Gaussian medium in shared memory
+    __shared__ float3  medium_rgb_batch[MAX_BLOCK_SIZE];
+    __shared__ float3  medium_bs_batch[MAX_BLOCK_SIZE];
+    __shared__ float3  medium_attn_batch[MAX_BLOCK_SIZE];
+
     // current visibility left to render
     float T = 1.f;
     // index of most recent gaussian to write to this thread's pixel
@@ -374,19 +394,19 @@ __global__ void rasterize_forward(
     // previous depth of the pixel
     float prev_depth = 0.f;
 
-    float3 medium_rgb_pix;
-    float3 medium_bs_pix;
-    float3 medium_attn_pix;
-    float min_medium_attn_pix;
-    if (inside) {
-        medium_rgb_pix = medium_rgb[pix_id];
-        medium_bs_pix = medium_bs[pix_id];
-        medium_attn_pix = medium_attn[pix_id];
-        prev_depth = 0.f;
-        // get the biggest one of medium_attn_pix xyz
-        min_medium_attn_pix = std::min(medium_attn_pix.x, std::min(medium_attn_pix.y, medium_attn_pix.z));
-        min_medium_attn_pix = std::min(0.f, min_medium_attn_pix);
-    }
+    // float3 medium_rgb_pix;
+    // float3 medium_bs_pix;
+    // float3 medium_attn_pix;
+    // float min_medium_attn_pix;
+    // if (inside) {
+    //     medium_rgb_pix = medium_rgb[pix_id];
+    //     medium_bs_pix = medium_bs[pix_id];
+    //     medium_attn_pix = medium_attn[pix_id];
+    //     prev_depth = 0.f;
+    //     // get the biggest one of medium_attn_pix xyz
+    //     min_medium_attn_pix = std::min(medium_attn_pix.x, std::min(medium_attn_pix.y, medium_attn_pix.z));
+    //     min_medium_attn_pix = std::min(0.f, min_medium_attn_pix);
+    // }
 
     // collect and process batches of gaussians
     // each thread loads one gaussian at a time before rasterizing its
@@ -415,6 +435,11 @@ __global__ void rasterize_forward(
             xy_opacity_batch[tr] = {xy.x, xy.y, opac};
             conic_batch[tr] = conics[g_id];
             depth_batch[tr] = depths[g_id];
+
+            // load per-Gaussian medium into shared memory
+            medium_rgb_batch[tr]  = medium_rgb[g_id];
+            medium_bs_batch[tr]   = medium_bs[g_id];
+            medium_attn_batch[tr] = medium_attn[g_id];
         }
 
         // wait for other threads to collect the gaussians in batch
@@ -433,7 +458,12 @@ __global__ void rasterize_forward(
                                 conic.y * delta.x * delta.y;
             const float alpha = min(0.999f, opac * __expf(-sigma));
 
-            if (sigma < 0.f || alpha * __expf(-min_medium_attn_pix * depth) < 1.f / 255.f) {
+            // if (sigma < 0.f || alpha * __expf(-min_medium_attn_pix * depth) < 1.f / 255.f) {
+            //     continue;
+            // }
+
+            // standard early exit --> no per-pixel medium_attn opt
+            if (sigma < 0.f || alpha < 1.f / 255.f) {
                 continue;
             }
 
@@ -446,12 +476,19 @@ __global__ void rasterize_forward(
             }
 
             int32_t g = id_batch[t];
+
+            // Read medium from shared memory (per-Gaussian)
+            const float3 medium_rgb_g  = medium_rgb_batch[t];
+            const float3 medium_bs_g   = medium_bs_batch[t];
+            const float3 medium_attn_g = medium_attn_batch[t];
+
+
             const float vis = alpha * T;
             const float3 c = colors[g];
             float3 exp_obj;
-            exp_obj.x = __expf(-medium_attn_pix.x * depth);
-            exp_obj.y = __expf(-medium_attn_pix.y * depth);
-            exp_obj.z = __expf(-medium_attn_pix.z * depth);
+            exp_obj.x = __expf(-medium_attn_g.x * depth);
+            exp_obj.y = __expf(-medium_attn_g.y * depth);
+            exp_obj.z = __expf(-medium_attn_g.z * depth);
             const float3 c_out = {vis * c.x, vis * c.y, vis * c.z};
             pix_clr.x = pix_clr.x + c_out.x;
             pix_clr.y = pix_clr.y + c_out.y;
@@ -465,12 +502,12 @@ __global__ void rasterize_forward(
             }
             // add medium scattering
             float3 exp_bs;
-            exp_bs.x = __expf(-medium_bs_pix.x * prev_depth) - __expf(-medium_bs_pix.x * depth);
-            exp_bs.y = __expf(-medium_bs_pix.y * prev_depth) - __expf(-medium_bs_pix.y * depth);
-            exp_bs.z = __expf(-medium_bs_pix.z * prev_depth) - __expf(-medium_bs_pix.z * depth);
-            pix_medium.x = pix_medium.x + T * exp_bs.x * medium_rgb_pix.x;
-            pix_medium.y = pix_medium.y + T * exp_bs.y * medium_rgb_pix.y;
-            pix_medium.z = pix_medium.z + T * exp_bs.z * medium_rgb_pix.z;
+            exp_bs.x = __expf(-medium_bs_g.x * prev_depth) - __expf(-medium_bs_g.x * depth);
+            exp_bs.y = __expf(-medium_bs_g.y * prev_depth) - __expf(-medium_bs_g.y * depth);
+            exp_bs.z = __expf(-medium_bs_g.z * prev_depth) - __expf(-medium_bs_g.z * depth);
+            pix_medium.x = pix_medium.x + T * exp_bs.x * medium_rgb_g.x;
+            pix_medium.y = pix_medium.y + T * exp_bs.y * medium_rgb_g.y;
+            pix_medium.z = pix_medium.z + T * exp_bs.z * medium_rgb_g.z;
             prev_depth = depth;
             T = next_T;
             cur_idx = batch_start + t;
@@ -486,15 +523,19 @@ __global__ void rasterize_forward(
         // float3 final_color;
         float3 final_medium;
         // add medium scattering
-        float3 exp_bs;
-        // const float depth = 10.f;
-        exp_bs.x = __expf(-medium_bs_pix.x * prev_depth);
-        exp_bs.y = __expf(-medium_bs_pix.y * prev_depth);
-        exp_bs.z = __expf(-medium_bs_pix.z * prev_depth);
+        // float3 exp_bs;
+        // // const float depth = 10.f;
+        // exp_bs.x = __expf(-medium_bs_pix.x * prev_depth);
+        // exp_bs.y = __expf(-medium_bs_pix.y * prev_depth);
+        // exp_bs.z = __expf(-medium_bs_pix.z * prev_depth);
 
-        final_medium.x = pix_medium.x + T * exp_bs.x * medium_rgb_pix.x;
-        final_medium.y = pix_medium.y + T * exp_bs.y * medium_rgb_pix.y;
-        final_medium.z = pix_medium.z + T * exp_bs.z * medium_rgb_pix.z;
+        // final_medium.x = pix_medium.x + T * exp_bs.x * medium_rgb_pix.x;
+        // final_medium.y = pix_medium.y + T * exp_bs.y * medium_rgb_pix.y;
+        // final_medium.z = pix_medium.z + T * exp_bs.z * medium_rgb_pix.z;
+
+        final_medium.x = pix_medium.x;
+        final_medium.y = pix_medium.y;
+        final_medium.z = pix_medium.z;
 
         out_img[pix_id] = pix_out;
         out_clr[pix_id] = pix_clr;

@@ -210,17 +210,22 @@ __global__ void rasterize_backward_kernel(
     __shared__ float3 rgbs_batch[MAX_BLOCK_SIZE];
     __shared__ float depth_batch[MAX_BLOCK_SIZE];
 
+    // per-Gaussian medium in shared memory
+    __shared__ float3  medium_rgb_batch[MAX_BLOCK_SIZE];
+    __shared__ float3  medium_bs_batch[MAX_BLOCK_SIZE];
+    __shared__ float3  medium_attn_batch[MAX_BLOCK_SIZE];
+
     // df/d_out for this pixel
     const float3 v_out = v_output[pix_id];
     const float3 v_out_med = v_out_medium[pix_id];
     const float v_out_alpha = v_output_alpha[pix_id];
 
-    const float3 medium_rgb_pix = medium_rgb[pix_id];
-    const float3 medium_bs_pix = medium_bs[pix_id];
-    const float3 medium_attn_pix = medium_attn[pix_id];
-    // get the smallest one of medium_attn_pix xyz
-    float min_medium_attn_pix = std::min(medium_attn_pix.x, std::min(medium_attn_pix.y, medium_attn_pix.z));
-    min_medium_attn_pix = std::min(0.f, min_medium_attn_pix);
+    // const float3 medium_rgb_pix = medium_rgb[pix_id];
+    // const float3 medium_bs_pix = medium_bs[pix_id];
+    // const float3 medium_attn_pix = medium_attn[pix_id];
+    // // get the smallest one of medium_attn_pix xyz
+    // float min_medium_attn_pix = std::min(medium_attn_pix.x, std::min(medium_attn_pix.y, medium_attn_pix.z));
+    // min_medium_attn_pix = std::min(0.f, min_medium_attn_pix);
     
     // latter depth
     float latter_depth = 10.f;
@@ -251,6 +256,10 @@ __global__ void rasterize_backward_kernel(
             conic_batch[tr] = conics[g_id];
             rgbs_batch[tr] = rgbs[g_id];
             depth_batch[tr] = depths[g_id];
+            // load per-Gaussian medium into shared memory
+            medium_rgb_batch[tr]  = medium_rgb[g_id];
+            medium_bs_batch[tr]   = medium_bs[g_id];
+            medium_attn_batch[tr] = medium_attn[g_id];
         }
         // wait for other threads to collect the gaussians in batch
         block.sync();
@@ -278,7 +287,8 @@ __global__ void rasterize_backward_kernel(
                                     conic.y * delta.x * delta.y;
                 vis = __expf(-sigma);
                 alpha = min(0.99f, opac * vis);
-                if (sigma < 0.f || alpha * __expf(-min_medium_attn_pix * depth) < 1.f / 255.f) {
+                // standard early exit
+                if (sigma < 0.f || alpha < 1.f / 255.f) {
                     valid = 0;
                 }
             }
@@ -292,116 +302,136 @@ __global__ void rasterize_backward_kernel(
             float2 v_xy_abs_local = {0.f, 0.f};
             float v_z_abs_local = 0.f;
             float v_opacity_local = 0.f;
-            float3 v_medium_rgb_pix_local = {0.f, 0.f, 0.f};
-            float3 v_medium_bs_pix_local = {0.f, 0.f, 0.f};
-            float3 v_medium_attn_pix_local = {0.f, 0.f, 0.f};
+            // medium gradients accumulated per Gaussian
+            float3 v_medium_rgb_g_local  = {0.f, 0.f, 0.f};
+            float3 v_medium_bs_g_local   = {0.f, 0.f, 0.f};
+            float3 v_medium_attn_g_local = {0.f, 0.f, 0.f};
             //initialize everything to 0, only set if the lane is valid
-            if(valid){
+                        if (valid) {
+                // Read per-Gaussian medium from shared memory
+                const float3 medium_rgb_g  = medium_rgb_batch[t];
+                const float3 medium_bs_g   = medium_bs_batch[t];
+                const float3 medium_attn_g = medium_attn_batch[t];
+
                 float3 exp_attn;
-                exp_attn.x = __expf(-medium_attn_pix.x * depth);
-                exp_attn.y = __expf(-medium_attn_pix.y * depth);
-                exp_attn.z = __expf(-medium_attn_pix.z * depth);
+                exp_attn.x = __expf(-medium_attn_g.x * depth);
+                exp_attn.y = __expf(-medium_attn_g.y * depth);
+                exp_attn.z = __expf(-medium_attn_g.z * depth);
+
                 float3 exp_bs;
-                exp_bs.x = __expf(-medium_bs_pix.x * depth);
-                exp_bs.y = __expf(-medium_bs_pix.y * depth);
-                exp_bs.z = __expf(-medium_bs_pix.z * depth);
-                
-                // update the running sum of medium for current depth to update current alpha
-                // T not updated yet
-                buffer_medium.x += T * medium_rgb_pix.x * exp_bs.x;
-                buffer_medium.y += T * medium_rgb_pix.y * exp_bs.y;
-                buffer_medium.z += T * medium_rgb_pix.z * exp_bs.z;
+                exp_bs.x = __expf(-medium_bs_g.x * depth);
+                exp_bs.y = __expf(-medium_bs_g.y * depth);
+                exp_bs.z = __expf(-medium_bs_g.z * depth);
 
-                // update the medium rgb
-                v_medium_rgb_pix_local.x += v_out_med.x * T * (exp_bs.x - latter_exp_bs.x);
-                v_medium_rgb_pix_local.y += v_out_med.y * T * (exp_bs.y - latter_exp_bs.y);
-                v_medium_rgb_pix_local.z += v_out_med.z * T * (exp_bs.z - latter_exp_bs.z);
+                // Running medium buffer (T not updated yet)
+                buffer_medium.x += T * medium_rgb_g.x * exp_bs.x;
+                buffer_medium.y += T * medium_rgb_g.y * exp_bs.y;
+                buffer_medium.z += T * medium_rgb_g.z * exp_bs.z;
 
-                float3 v_exp_bs_local = {v_out_med.x * T * medium_rgb_pix.x, v_out_med.y * T * medium_rgb_pix.y, v_out_med.z * T * medium_rgb_pix.z};
-                // update the medium bs
-                v_medium_bs_pix_local.x += v_exp_bs_local.x * (-depth * exp_bs.x + latter_depth * latter_exp_bs.x);
-                v_medium_bs_pix_local.y += v_exp_bs_local.y * (-depth * exp_bs.y + latter_depth * latter_exp_bs.y);
-                v_medium_bs_pix_local.z += v_exp_bs_local.z * (-depth * exp_bs.z + latter_depth * latter_exp_bs.z);
+                // Gradient wrt medium_rgb (B_inf)
+                v_medium_rgb_g_local.x += v_out_med.x * T * (exp_bs.x - latter_exp_bs.x);
+                v_medium_rgb_g_local.y += v_out_med.y * T * (exp_bs.y - latter_exp_bs.y);
+                v_medium_rgb_g_local.z += v_out_med.z * T * (exp_bs.z - latter_exp_bs.z);
 
-                // compute the current T for this gaussian
-                float ra = 1.f / (1.f - alpha);
+                // Gradient wrt medium_bs (beta_B)
+                float3 v_exp_bs_local = {
+                    v_out_med.x * T * medium_rgb_g.x,
+                    v_out_med.y * T * medium_rgb_g.y,
+                    v_out_med.z * T * medium_rgb_g.z
+                };
+                v_medium_bs_g_local.x += v_exp_bs_local.x * (-depth * exp_bs.x + latter_depth * latter_exp_bs.x);
+                v_medium_bs_g_local.y += v_exp_bs_local.y * (-depth * exp_bs.y + latter_depth * latter_exp_bs.y);
+                v_medium_bs_g_local.z += v_exp_bs_local.z * (-depth * exp_bs.z + latter_depth * latter_exp_bs.z);
+
+                // Update T
+                const float ra  = 1.f / (1.f - alpha);
                 T *= ra;
 
-                // v_z_abs_local += fabsf(v_exp_bs_local.x * medium_bs_pix.x * exp_bs.x * (ra - 1.f));
-                // v_z_abs_local += fabsf(v_exp_bs_local.y * medium_bs_pix.y * exp_bs.y * (ra - 1.f));
-                // v_z_abs_local += fabsf(v_exp_bs_local.z * medium_bs_pix.z * exp_bs.z * (ra - 1.f));
-                v_z_abs_local += fabsf(v_exp_bs_local.x * medium_bs_pix.x * exp_bs.x * (ra + 1.f));
-                v_z_abs_local += fabsf(v_exp_bs_local.y * medium_bs_pix.y * exp_bs.y * (ra + 1.f));
-                v_z_abs_local += fabsf(v_exp_bs_local.z * medium_bs_pix.z * exp_bs.z * (ra + 1.f));
+                v_z_abs_local += fabsf(v_exp_bs_local.x * medium_bs_g.x * exp_bs.x * (ra + 1.f));
+                v_z_abs_local += fabsf(v_exp_bs_local.y * medium_bs_g.y * exp_bs.y * (ra + 1.f));
+                v_z_abs_local += fabsf(v_exp_bs_local.z * medium_bs_g.z * exp_bs.z * (ra + 1.f));
 
-                // update v_rgb for this gaussian
+                // Gradient wrt rgb
                 const float3 rgb = rgbs_batch[t];
-                const float fac = alpha * T;
-                float v_alpha = 0.f;
+                const float  fac = alpha * T;
                 float3 exp_attn_fac = {fac * exp_attn.x, fac * exp_attn.y, fac * exp_attn.z};
-                v_rgb_local = {v_out.x * exp_attn_fac.x, v_out.y * exp_attn_fac.y, v_out.z * exp_attn_fac.z};
-                float3 v_exp_attn_local = {v_rgb_local.x * rgb.x, v_rgb_local.y * rgb.y, v_rgb_local.z * rgb.z};
-                
-                // update v_medium_attn
-                v_medium_attn_pix_local.x += -v_exp_attn_local.x * depth;
-                v_medium_attn_pix_local.y += -v_exp_attn_local.y * depth;
-                v_medium_attn_pix_local.z += -v_exp_attn_local.z * depth;
+                v_rgb_local = {
+                    v_out.x * exp_attn_fac.x,
+                    v_out.y * exp_attn_fac.y,
+                    v_out.z * exp_attn_fac.z
+                };
 
-                v_z_abs_local += fabsf(v_exp_attn_local.x * medium_attn_pix.x);
-                v_z_abs_local += fabsf(v_exp_attn_local.y * medium_attn_pix.y);
-                v_z_abs_local += fabsf(v_exp_attn_local.z * medium_attn_pix.z);
+                // Gradient wrt medium_attn (beta_D)
+                float3 v_exp_attn_local = {
+                    v_rgb_local.x * rgb.x,
+                    v_rgb_local.y * rgb.y,
+                    v_rgb_local.z * rgb.z
+                };
+                v_medium_attn_g_local.x += -v_exp_attn_local.x * depth;
+                v_medium_attn_g_local.y += -v_exp_attn_local.y * depth;
+                v_medium_attn_g_local.z += -v_exp_attn_local.z * depth;
 
-                // contribution from this pixel
+                v_z_abs_local += fabsf(v_exp_attn_local.x * medium_attn_g.x);
+                v_z_abs_local += fabsf(v_exp_attn_local.y * medium_attn_g.y);
+                v_z_abs_local += fabsf(v_exp_attn_local.z * medium_attn_g.z);
+
+                // Gradient wrt alpha
+                float v_alpha = 0.f;
                 v_alpha += (rgb.x * T * exp_attn.x - buffer.x * ra) * v_out.x - buffer_medium.x * ra * v_out_med.x;
                 v_alpha += (rgb.y * T * exp_attn.y - buffer.y * ra) * v_out.y - buffer_medium.y * ra * v_out_med.y;
                 v_alpha += (rgb.z * T * exp_attn.z - buffer.z * ra) * v_out.z - buffer_medium.z * ra * v_out_med.z;
                 v_alpha += T_final * ra * v_out_alpha;
 
-                // update the running sum
+                // Update running buffer
                 buffer.x += rgb.x * exp_attn_fac.x;
                 buffer.y += rgb.y * exp_attn_fac.y;
                 buffer.z += rgb.z * exp_attn_fac.z;
 
-                // update the running sum of medium for depth to update former alpha
-                buffer_medium.x += -T * medium_rgb_pix.x * exp_bs.x;
-                buffer_medium.y += -T * medium_rgb_pix.y * exp_bs.y;
-                buffer_medium.z += -T * medium_rgb_pix.z * exp_bs.z;
+                buffer_medium.x += -T * medium_rgb_g.x * exp_bs.x;
+                buffer_medium.y += -T * medium_rgb_g.y * exp_bs.y;
+                buffer_medium.z += -T * medium_rgb_g.z * exp_bs.z;
 
-                latter_depth = depth;
-                latter_exp_bs.x = exp_bs.x;
-                latter_exp_bs.y = exp_bs.y;
-                latter_exp_bs.z = exp_bs.z;
+                // Update latter depth/exp_bs for next iteration
+                latter_depth  = depth;
+                latter_exp_bs = exp_bs;
 
                 const float v_sigma = -opac * vis * v_alpha;
-                v_conic_local = {0.5f * v_sigma * delta.x * delta.x, 
-                                 v_sigma * delta.x * delta.y,
-                                 0.5f * v_sigma * delta.y * delta.y};
-                v_xy_local = {v_sigma * (conic.x * delta.x + conic.y * delta.y), 
-                                    v_sigma * (conic.y * delta.x + conic.z * delta.y)};
-                v_xy_abs_local = {fabsf(v_xy_local.x), fabsf(v_xy_local.y)};
+                v_conic_local = {
+                    0.5f * v_sigma * delta.x * delta.x,
+                    v_sigma * delta.x * delta.y,
+                    0.5f * v_sigma * delta.y * delta.y
+                };
+                v_xy_local = {
+                    v_sigma * (conic.x * delta.x + conic.y * delta.y),
+                    v_sigma * (conic.y * delta.x + conic.z * delta.y)
+                };
+                v_xy_abs_local  = {fabsf(v_xy_local.x), fabsf(v_xy_local.y)};
                 v_opacity_local = vis * v_alpha;
             }
+
             warpSum3(v_rgb_local, warp);
             warpSum3(v_conic_local, warp);
             warpSum2(v_xy_local, warp);
             warpSum2(v_xy_abs_local, warp);
             warpSum(v_z_abs_local, warp);
             warpSum(v_opacity_local, warp);
-            warpSum3(v_medium_rgb_pix_local, warp);
-            warpSum3(v_medium_bs_pix_local, warp);
-            warpSum3(v_medium_attn_pix_local, warp);
+            warpSum3(v_medium_rgb_g_local, warp);
+            warpSum3(v_medium_bs_g_local, warp);
+            warpSum3(v_medium_attn_g_local, warp);
+
             if (warp.thread_rank() == 0) {
                 int32_t g = id_batch[t];
+
                 float* v_rgb_ptr = (float*)(v_rgb);
                 atomicAdd(v_rgb_ptr + 3*g + 0, v_rgb_local.x);
                 atomicAdd(v_rgb_ptr + 3*g + 1, v_rgb_local.y);
                 atomicAdd(v_rgb_ptr + 3*g + 2, v_rgb_local.z);
-                
+
                 float* v_conic_ptr = (float*)(v_conic);
                 atomicAdd(v_conic_ptr + 3*g + 0, v_conic_local.x);
                 atomicAdd(v_conic_ptr + 3*g + 1, v_conic_local.y);
                 atomicAdd(v_conic_ptr + 3*g + 2, v_conic_local.z);
-                
+
                 float* v_xy_ptr = (float*)(v_xy);
                 atomicAdd(v_xy_ptr + 2*g + 0, v_xy_local.x);
                 atomicAdd(v_xy_ptr + 2*g + 1, v_xy_local.y);
@@ -409,55 +439,31 @@ __global__ void rasterize_backward_kernel(
                 float* v_xy_abs_ptr = (float*)(xys_grad_abs);
                 atomicAdd(v_xy_abs_ptr + 2*g + 0, v_xy_abs_local.x);
                 atomicAdd(v_xy_abs_ptr + 2*g + 1, v_xy_abs_local.y);
-                
+
                 atomicAdd(v_opacity + g, v_opacity_local);
 
+                // Writing medium gradients to Gaussian index g
                 float* v_medium_attn_ptr = (float*)(v_medium_attn);
-                atomicAdd(v_medium_attn_ptr + 3*pix_id + 0, v_medium_attn_pix_local.x);
-                atomicAdd(v_medium_attn_ptr + 3*pix_id + 1, v_medium_attn_pix_local.y);
-                atomicAdd(v_medium_attn_ptr + 3*pix_id + 2, v_medium_attn_pix_local.z);
+                atomicAdd(v_medium_attn_ptr + 3*g + 0, v_medium_attn_g_local.x);
+                atomicAdd(v_medium_attn_ptr + 3*g + 1, v_medium_attn_g_local.y);
+                atomicAdd(v_medium_attn_ptr + 3*g + 2, v_medium_attn_g_local.z);
 
                 float* v_medium_rgb_ptr = (float*)(v_medium_rgb);
-                atomicAdd(v_medium_rgb_ptr + 3*pix_id + 0, v_medium_rgb_pix_local.x);
-                atomicAdd(v_medium_rgb_ptr + 3*pix_id + 1, v_medium_rgb_pix_local.y);
-                atomicAdd(v_medium_rgb_ptr + 3*pix_id + 2, v_medium_rgb_pix_local.z);
+                atomicAdd(v_medium_rgb_ptr + 3*g + 0, v_medium_rgb_g_local.x);
+                atomicAdd(v_medium_rgb_ptr + 3*g + 1, v_medium_rgb_g_local.y);
+                atomicAdd(v_medium_rgb_ptr + 3*g + 2, v_medium_rgb_g_local.z);
 
                 float* v_medium_bs_ptr = (float*)(v_medium_bs);
-                atomicAdd(v_medium_bs_ptr + 3*pix_id + 0, v_medium_bs_pix_local.x);
-                atomicAdd(v_medium_bs_ptr + 3*pix_id + 1, v_medium_bs_pix_local.y);
-                atomicAdd(v_medium_bs_ptr + 3*pix_id + 2, v_medium_bs_pix_local.z);
-
+                atomicAdd(v_medium_bs_ptr + 3*g + 0, v_medium_bs_g_local.x);
+                atomicAdd(v_medium_bs_ptr + 3*g + 1, v_medium_bs_g_local.y);
+                atomicAdd(v_medium_bs_ptr + 3*g + 2, v_medium_bs_g_local.z);
             }
         }
     }
-
-    block.sync();
-
-    // the medium from the camera to the first gaussian
-    if (inside) {
-        float3 v_medium_rgb_pix_local = {0.f, 0.f, 0.f};
-        float3 v_medium_bs_pix_local = {0.f, 0.f, 0.f};
-        float3 exp_bs = {1.f, 1.f, 1.f};
-        T = 1.f;
-
-        v_medium_rgb_pix_local.x += v_out_med.x * T * (exp_bs.x - latter_exp_bs.x);
-        v_medium_rgb_pix_local.y += v_out_med.y * T * (exp_bs.y - latter_exp_bs.y);
-        v_medium_rgb_pix_local.z += v_out_med.z * T * (exp_bs.z - latter_exp_bs.z);
-        
-        float3 v_exp_bs_local = {v_out_med.x * T * medium_rgb_pix.x, v_out_med.y * T * medium_rgb_pix.y, v_out_med.z * T * medium_rgb_pix.z};
-        v_medium_bs_pix_local.x += v_exp_bs_local.x * latter_depth * latter_exp_bs.x;
-        v_medium_bs_pix_local.y += v_exp_bs_local.y * latter_depth * latter_exp_bs.y;
-        v_medium_bs_pix_local.z += v_exp_bs_local.z * latter_depth * latter_exp_bs.z;
-        float* v_medium_rgb_ptr = (float*)(v_medium_rgb);
-        atomicAdd(v_medium_rgb_ptr + 3*pix_id + 0, v_medium_rgb_pix_local.x);
-        atomicAdd(v_medium_rgb_ptr + 3*pix_id + 1, v_medium_rgb_pix_local.y);
-        atomicAdd(v_medium_rgb_ptr + 3*pix_id + 2, v_medium_rgb_pix_local.z);
-
-        float* v_medium_bs_ptr = (float*)(v_medium_bs);
-        atomicAdd(v_medium_bs_ptr + 3*pix_id + 0, v_medium_bs_pix_local.x);
-        atomicAdd(v_medium_bs_ptr + 3*pix_id + 1, v_medium_bs_pix_local.y);
-        atomicAdd(v_medium_bs_ptr + 3*pix_id + 2, v_medium_bs_pix_local.z);
-    }
+    // Epilogue block (camera-to-first-Gaussian backscatter
+    // gradient) removed --> that block used per-pixel medium_rgb_pix which
+    // no longer exists. Gradient signal is fully captured per-Gaussian
+    // in the main loop above.
 }
 
 __global__ void project_gaussians_backward_kernel(

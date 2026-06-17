@@ -503,7 +503,7 @@ nd_rasterize_forward_tensor(
         {img_height, img_width}, xys.options().dtype(torch::kInt32)
     );
     const int B = block_dim3.x * block_dim3.y;
-    const uint32_t shared_mem = B*sizeof(int) + B*sizeof(float3) + B*sizeof(float3) + B*channels*sizeof(half);
+    const uint32_t shared_mem = B*sizeof(int32_t) + B*sizeof(float3) + B*sizeof(float3) + B*sizeof(float) + B*channels*sizeof(half);
     if(cudaFuncSetAttribute(nd_rasterize_forward, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem) != cudaSuccess){
         AT_ERROR("Failed to set maximum shared memory size (requested ", shared_mem, " bytes), try lowering block_size");
     }
@@ -592,9 +592,9 @@ std::
     torch::Tensor v_colors =
         torch::zeros({num_points, channels}, xys.options());
     torch::Tensor v_opacity = torch::zeros({num_points, 1}, xys.options());
-    torch::Tensor v_medium_rgb = torch::zeros({img_height, img_width, channels}, xys.options());
-    torch::Tensor v_medium_bs = torch::zeros({img_height, img_width, channels}, xys.options());
-    torch::Tensor v_medium_attn = torch::zeros({img_height, img_width, channels}, xys.options());
+    torch::Tensor v_medium_rgb  = torch::zeros({num_points, channels}, xys.options());
+    torch::Tensor v_medium_bs   = torch::zeros({num_points, channels}, xys.options());
+    torch::Tensor v_medium_attn = torch::zeros({num_points, channels}, xys.options());
 
     const int B = block.x * block.y;
     //shared mem accounts for each thread having a local shared memory workspace for running sum
@@ -695,9 +695,9 @@ std::
     torch::Tensor v_colors =
         torch::zeros({num_points, channels}, xys.options());
     torch::Tensor v_opacity = torch::zeros({num_points, 1}, xys.options());
-    torch::Tensor v_medium_rgb = torch::zeros({img_height, img_width, 3}, xys.options());
-    torch::Tensor v_medium_bs = torch::zeros({img_height, img_width, 3}, xys.options());
-    torch::Tensor v_medium_attn = torch::zeros({img_height, img_width, 3}, xys.options());
+    torch::Tensor v_medium_rgb  = torch::zeros({num_points, 3}, xys.options());
+    torch::Tensor v_medium_bs   = torch::zeros({num_points, 3}, xys.options());
+    torch::Tensor v_medium_attn = torch::zeros({num_points, 3}, xys.options());
 
     rasterize_backward_kernel<<<tile_bounds, block>>>(
         tile_bounds,
