@@ -53,4 +53,3 @@ water_splatting = "water_splatting.water_splatting_config:water_splatting_method
 water_splatting_big = "water_splatting.water_splatting_config:water_splatting_method_big"
 hash_water_splatting = "water_splatting.hash_water_splatting_config:hash_water_splatting_method"
 hash_water_splatting_big = "water_splatting.hash_water_splatting_config:hash_water_splatting_method_big"
-# export NERFSTUDIO_METHOD_CONFIGS="water-splatting=water_splatting.water_splatting_config:water_splatting_method"

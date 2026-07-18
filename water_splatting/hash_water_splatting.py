@@ -1,11 +1,6 @@
-# Original work:
+# ruff: noqa: E741
 # Copyright 2024 Huapeng Li, Wenxuan Song, Tianao Xu, Alexandre Elsig and Jonas KulhanekS. All rights reserved.
 #
-# Modified work:
-# Copyright 2025 Kaushlendra Kumar Giri. All rights reserved.
-#
-# Modifications: replaced direction-conditioned MLP medium field with a spatially-varying instant-NGP hash grid (HashMedium).
-# 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -51,7 +46,6 @@ from nerfstudio.utils.rich_utils import CONSOLE
 from water_splatting.hash_medium import HashMedium
 
 
-
 def random_quat_tensor(N):
     """
     Defines a random quaternion tensor of shape (N, 4)
@@ -88,7 +82,7 @@ def SH2RGB(sh):
 
 @dataclass
 class HashWaterSplattingModelConfig(ModelConfig):
-    """Water Splatting Model Config"""
+    """Hash Water Splatting Model Config"""
 
     _target: Type = field(default_factory=lambda: HashWaterSplattingModel)
     num_steps: int = 15000
@@ -161,31 +155,23 @@ class HashWaterSplattingModelConfig(ModelConfig):
     However, PLY exported with antialiased rasterize mode is not compatible with classic mode. Thus many web viewers that
     were implemented for classic mode can not render antialiased mode PLY properly without modifications.
     """
-
     medium_density_bias: float = 0.0
     """Bias for medium density (sigma_bs and sigma_attn)."""
-     # Hash-grid medium config 
     hash_aabb_scale: float = 4.0
-    """Half-side of the scene bounding cube used to normalise Gaussian
-    positions to [0,1]³ before querying the hash grid.  Set this to
-    roughly half the diameter of your scene in world units."""
+    """Half-side of the hash grid bounding cube."""
     hash_n_levels: int = 16
-    """Number of hash-grid levels (instant-NGP default: 16)."""
     hash_n_features_per_level: int = 2
-    """Features stored per hash-grid level (instant-NGP default: 2)."""
     hash_log2_hashmap_size: int = 19
-    """Log₂ of the hash-table size per level (controls memory vs. quality)."""
     hash_base_resolution: int = 16
-    """Coarsest grid resolution."""
     hash_per_level_scale: float = 1.5
-    """Geometric growth factor between hash-grid levels."""
     hash_hidden_dim: int = 64
-    """Width of the MLP that reads hash features."""
     hash_n_hidden_layers: int = 2
-    """Depth of the MLP that reads hash features."""
     hash_implementation: Literal["tcnn", "torch"] = "tcnn"
-    """Backend: 'tcnn' (tiny-cuda-nn, fast) or 'torch' (pure PyTorch,
-    slower but easier to debug and CPU-compatible)."""
+    hash_logit_clamp: float = 10.0
+    medium_warmup_steps: int = 2000
+    """Steps where appearance SH coeffs are detached so geometry/medium train first."""
+    beta_b_proportion_weight: float = 0.0
+    beta_b_proportion_ceiling: float = 1.0
 
 
 class HashWaterSplattingModel(Model):
@@ -206,13 +192,9 @@ class HashWaterSplattingModel(Model):
         super().__init__(*args, **kwargs)
 
     def populate_modules(self):
-        # initialize the medium MLP
-        # self.direction_encoding = SHEncoding(levels=4, implementation="tcnn")
         self.colour_activation = nn.Sigmoid()
         self.sigma_activation = nn.Softplus()
         self.medium_density_bias = self.config.medium_density_bias
-
-        # Hash-grid medium field
         self.hash_medium = HashMedium(
             aabb_scale=self.config.hash_aabb_scale,
             n_levels=self.config.hash_n_levels,
@@ -223,30 +205,8 @@ class HashWaterSplattingModel(Model):
             hidden_dim=self.config.hash_hidden_dim,
             n_hidden_layers=self.config.hash_n_hidden_layers,
             implementation=self.config.hash_implementation,
+            logit_clamp=self.config.hash_logit_clamp,
         )
-        # # medium MLP
-        # num_layers_medium=self.config.num_layers_medium,
-        # hidden_dim_medium=self.config.hidden_dim_medium,
-        # self.medium_density_bias=self.config.medium_density_bias,
-        # # if type is tuple, then [0]
-        # num_layers_medium = num_layers_medium if isinstance(num_layers_medium, int) else num_layers_medium[0]
-        # hidden_dim_medium = hidden_dim_medium if isinstance(hidden_dim_medium, int) else hidden_dim_medium[0]
-        # self.medium_density_bias = self.medium_density_bias if isinstance(self.medium_density_bias, float) else self.medium_density_bias[0]
-        # # ------------------------Medium network------------------------
-        # # Medium MLP
-        # if num_layers_medium > 1:
-        #     self.medium_mlp = MLP(
-        #         in_dim=self.direction_encoding.get_out_dim(),
-        #         num_layers=num_layers_medium,
-        #         layer_width=hidden_dim_medium,
-        #         out_dim=9,
-        #         activation=nn.Sigmoid(),
-        #         out_activation=None,
-        #         implementation=self.config.mlp_type,
-        #     )
-        # else:
-        #     self.medium_mlp = nn.Linear(self.direction_encoding.get_out_dim(), 9)
-        #     self.config.mlp_type = "torch"
 
         if self.seed_points is not None and not self.config.random_init:
             means = torch.nn.Parameter(self.seed_points[0])  # (Location, Color)
@@ -353,14 +313,6 @@ class HashWaterSplattingModel(Model):
     @property
     def opacities(self):
         return self.gauss_params["opacities"]
-    
-    # @property
-    # def medium_mlp(self):
-    #     return self.gauss_params["medium_mlp"]
-    
-    # @property
-    # def direction_encoding(self):
-    #     return self.gauss_params["direction_encoding"]
 
     def load_state_dict(self, dict, **kwargs):  # type: ignore
         # resize the parameters to match the new number of points
@@ -474,25 +426,9 @@ class HashWaterSplattingModel(Model):
                 self.vis_counts = torch.ones_like(self.xys_grad_norm)
             else:
                 assert self.vis_counts is not None
-                # self.vis_counts[visible_mask] = self.vis_counts[visible_mask] + 1
-                # self.xys_grad_norm[visible_mask] = grads[visible_mask] + self.xys_grad_norm[visible_mask]
-                # self.depths_accum[visible_mask] = self.depths[visible_mask] + self.depths_accum[visible_mask]
-
-                if (
-                    visible_mask.shape[0] != self.vis_counts.shape[0]
-                    or visible_mask.shape[0] != self.xys_grad_norm.shape[0]
-                    or visible_mask.shape[0] != self.depths_accum.shape[0]
-                ):
-                    self.xys_grad_norm = None
-                    self.vis_counts = None
-                    self.depths_accum = None
-                    self.max_2Dsize = None
-                    return
-
-                self.vis_counts[visible_mask] += 1
-                self.xys_grad_norm[visible_mask] += grads[visible_mask]
-                self.depths_accum[visible_mask] += self.depths[visible_mask]    
-                
+                self.vis_counts[visible_mask] = self.vis_counts[visible_mask] + 1
+                self.xys_grad_norm[visible_mask] = grads[visible_mask] + self.xys_grad_norm[visible_mask]
+                self.depths_accum[visible_mask] = self.depths[visible_mask] + self.depths_accum[visible_mask]
 
             # update the max screen size, as a ratio of number of pixels
             if self.max_2Dsize is None:
@@ -585,18 +521,9 @@ class HashWaterSplattingModel(Model):
     
             if deleted_mask is not None:
                 self.remove_from_all_optim(optimizers, deleted_mask)
+                # hash_medium has fixed-size params — do not reset Adam state on cull.
 
-                # reset the exp of optimizer
-                for key in ["hash_medium"]:
-                    optim = optimizers.optimizers[key]
-                    param = optim.param_groups[0]["params"][0]
-                    param_state = optim.state[param]
-                    if "exp_avg" in param_state:
-                        param_state["exp_avg"] = torch.zeros_like(param_state["exp_avg"])
-                        param_state["exp_avg_sq"] = torch.zeros_like(param_state["exp_avg_sq"])
-
-                
-            if self.step < self.config.stop_split_at and self.step % reset_interval == self.config.refine_every:                
+            if self.step < self.config.stop_split_at and self.step % reset_interval == self.config.refine_every:
                 # Reset value is set to be reset_alpha_thresh
                 reset_value = self.config.reset_alpha_thresh
                 self.opacities.data = torch.clamp(
@@ -703,6 +630,13 @@ class HashWaterSplattingModel(Model):
         self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         cbs = []
+        cbs.append(
+            TrainingCallback(
+                [TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
+                self._validate_training_schedule,
+                args=[training_callback_attributes.trainer],
+            )
+        )
         cbs.append(TrainingCallback([TrainingCallbackLocation.BEFORE_TRAIN_ITERATION], self.step_cb))
         # The order of these matters
         cbs.append(
@@ -720,6 +654,26 @@ class HashWaterSplattingModel(Model):
             )
         )
         return cbs
+
+    def _validate_training_schedule(self, trainer, step: int) -> None:
+        if step != 0 or trainer is None:
+            return
+        max_iters = trainer.config.max_num_iterations
+        if self.config.num_steps != max_iters:
+            raise ValueError(
+                f"model.num_steps ({self.config.num_steps}) != max_num_iterations ({max_iters}). "
+                "Update hash_water_splatting_config.MAX_TRAIN_STEPS or pass matching CLI overrides."
+            )
+        mismatched = []
+        for name, group in trainer.config.optimizers.items():
+            sched = group.get("scheduler")
+            if sched is not None and sched.max_steps != max_iters:
+                mismatched.append(f"  {name}: scheduler.max_steps={sched.max_steps}")
+        if mismatched:
+            raise ValueError(
+                f"Optimizer scheduler max_steps must equal max_num_iterations ({max_iters}):\n"
+                + "\n".join(mismatched)
+            )
 
     def step_cb(self, step):
         self.step = step
@@ -739,8 +693,6 @@ class HashWaterSplattingModel(Model):
             Mapping of different parameter groups
         """
         gps = self.get_gaussian_param_groups()
-        # gps["medium_mlp"] = list(self.medium_mlp.parameters())
-        # gps["direction_encoding"] = list(self.direction_encoding.parameters())
         gps["hash_medium"] = list(self.hash_medium.parameters())
         return gps
 
@@ -801,94 +753,22 @@ class HashWaterSplattingModel(Model):
         self.last_fx = camera.fx.item()
         self.last_fy = camera.fy.item()
 
-
-        # # Medium
-        # # Encode directions
-        # y = torch.linspace(0., H, H, device=self.device)
-        # x = torch.linspace(0., W, W, device=self.device)
-        # yy, xx = torch.meshgrid(y, x)
-        # yy = (yy - cy) / camera.fy.item()
-        # xx = (xx - cx) / camera.fx.item()
-        # directions = torch.stack([xx, yy, torch.ones_like(xx)], dim=-1)
-        # norms = torch.linalg.norm(directions, dim=-1, keepdim=True)
-        # directions = directions / norms
-        # directions = directions @ R.T
-
-        # directions_flat = directions.view(-1, 3)
-        # directions_encoded = self.direction_encoding(directions_flat)
-        # outputs_shape = directions.shape[:-1]
-
-        # # Medium MLP forward pass
-        # if self.config.mlp_type == "tcnn":
-        #     medium_base_out = self.medium_mlp(directions_encoded)
-        # else:
-        #     medium_base_out = self.medium_mlp(directions_encoded.float())
-        
-        # # different activations for different outputs
-        # medium_rgb = (
-        #     self.colour_activation(medium_base_out[..., :3])
-        #     .view(*outputs_shape, -1)
-        #     .to(directions)
-        # )
-        # medium_bs = (
-        #     self.sigma_activation(medium_base_out[..., 3:6] + self.medium_density_bias)
-        #     .view(*outputs_shape, -1)
-        #     .to(directions)
-        # )
-        # medium_attn = (
-        #     self.sigma_activation(medium_base_out[..., 6:] + self.medium_density_bias)
-        #     .view(*outputs_shape, -1)
-        #     .to(directions)
-        # )
-        # if self.config.zero_medium:
-        #     medium_rgb = torch.zeros_like(medium_rgb)
-        #     medium_bs = torch.zeros_like(medium_bs)
-        #     medium_attn = torch.zeros_like(medium_attn)
-
-        # if self.crop_box is not None and not self.training:
-        #     crop_ids = self.crop_box.within(self.means).squeeze()
-        #     if crop_ids.sum() == 0:
-        #         rgb = medium_rgb
-        #         depth = medium_rgb.new_ones(*rgb.shape[:2], 1) * 10
-        #         accumulation = medium_rgb.new_zeros(*rgb.shape[:2], 1)
-        #         return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb, 
-        #                 "rgb_object": torch.zeros_like(rgb), "rgb_medium": medium_rgb, "pred_image": rgb,
-        #                 "medium_rgb": medium_rgb, "medium_bs": medium_bs, "medium_attn": medium_attn}
-        # else:
-        #     crop_ids = None
-
-        # if crop_ids is not None and crop_ids.sum() != 0:
-        #     opacities_crop = self.opacities[crop_ids]
-        #     means_crop = self.means[crop_ids]
-        #     features_dc_crop = self.features_dc[crop_ids]
-        #     features_rest_crop = self.features_rest[crop_ids]
-        #     scales_crop = self.scales[crop_ids]
-        #     quats_crop = self.quats[crop_ids]
-        # else:
-        #     opacities_crop = self.opacities
-        #     means_crop = self.means
-        #     features_dc_crop = self.features_dc
-        #     features_rest_crop = self.features_rest
-        #     scales_crop = self.scales
-        #     quats_crop = self.quats
-
-        # Crop Gaussians to oriented bounding box if specified (only for evaluation, not during training)
- 
         if self.crop_box is not None and not self.training:
             crop_ids = self.crop_box.within(self.means).squeeze()
             if crop_ids.sum() == 0:
-                # No Gaussians in view — return a plain black frame.
                 blank = torch.zeros(H, W, 3, device=self.device)
                 depth = blank.new_ones(H, W, 1) * 10
                 accumulation = blank.new_zeros(H, W, 1)
-                # Medium tensors are (0, 3) when there are no Gaussians;
-                # report zeros for metrics.
                 empty_medium = torch.zeros(0, 3, device=self.device)
                 return {
-                    "rgb": blank, "depth": depth, "accumulation": accumulation,
+                    "rgb": blank,
+                    "depth": depth,
+                    "accumulation": accumulation,
                     "background": blank,
-                    "rgb_object": blank, "rgb_clear": blank,
-                    "rgb_clear_clamp": blank, "rgb_medium": blank,
+                    "rgb_object": blank,
+                    "rgb_clear": blank,
+                    "rgb_clear_clamp": blank,
+                    "rgb_medium": blank,
                     "pred_image": blank,
                     "medium_rgb": empty_medium,
                     "medium_bs": empty_medium,
@@ -896,7 +776,7 @@ class HashWaterSplattingModel(Model):
                 }
         else:
             crop_ids = None
- 
+
         if crop_ids is not None and crop_ids.sum() != 0:
             opacities_crop = self.opacities[crop_ids]
             means_crop = self.means[crop_ids]
@@ -911,36 +791,19 @@ class HashWaterSplattingModel(Model):
             features_rest_crop = self.features_rest
             scales_crop = self.scales
             quats_crop = self.quats
- 
-        # ---- Hash-grid medium query (per-Gaussian) ----------------------
-        # raw: (N_crop, 9) — activations applied here so that
-        # medium_density_bias is still honoured.
-        raw = self.hash_medium(means_crop)          # (N, 9)
-        medium_rgb  = self.colour_activation(raw[:, :3])                               # B_∞  (N,3)
-        medium_bs   = self.sigma_activation(raw[:, 3:6] + self.medium_density_bias)    # β_B  (N,3)
-        medium_attn = self.sigma_activation(raw[:, 6:]  + self.medium_density_bias)    # β_D  (N,3)
 
-
-        # CUDA kernel still expects (H,W,3) until Phase 2 is done.
-        # For zero_medium=True smoke test, pass pixel-sized zeros.
-        # For zero_medium=False, Phase 2 CUDA is required first.
-        # if self.config.zero_medium:
-        #     medium_rgb  = torch.zeros(H, W, 3, device=self.device)
-        #     medium_bs   = torch.zeros(H, W, 3, device=self.device)
-        #     medium_attn = torch.zeros(H, W, 3, device=self.device)
-        # else:
-        #     raise NotImplementedError(
-        #         "zero_medium=False requires Phase 2 CUDA changes. "
-        #         "Run with --pipeline.model.zero_medium True for now."
-        #     )
-
+        raw = self.hash_medium(means_crop)
+        medium_rgb = self.colour_activation(raw[:, :3])
+        medium_bs = self.sigma_activation(raw[:, 3:6] + self.medium_density_bias)
+        medium_attn = self.sigma_activation(raw[:, 6:] + self.medium_density_bias)
         if self.config.zero_medium:
-            medium_rgb  = torch.zeros_like(medium_rgb)
-            medium_bs   = torch.zeros_like(medium_bs)
+            medium_rgb = torch.zeros_like(medium_rgb)
+            medium_bs = torch.zeros_like(medium_bs)
             medium_attn = torch.zeros_like(medium_attn)
- 
 
         colors_crop = torch.cat((features_dc_crop[:, None, :], features_rest_crop), dim=1)
+        if self.training and self.step < self.config.medium_warmup_steps:
+            colors_crop = colors_crop.detach()
         BLOCK_WIDTH = 16  # this controls the tile size of rasterization, 16 is a good default
 
         self.xys, depths, self.radii, conics, comp, num_tiles_hit, cov3d = project_gaussians(  # type: ignore
@@ -965,12 +828,23 @@ class HashWaterSplattingModel(Model):
         camera.rescale_output_resolution(camera_downscale)
 
         if (self.radii).sum() == 0:
-            rgb = medium_rgb
-            depth = medium_rgb.new_ones(*rgb.shape[:2], 1) * 10
-            accumulation = medium_rgb.new_zeros(*rgb.shape[:2], 1)
-            return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb, 
-                    "rgb_object": torch.zeros_like(rgb), "rgb_clear": torch.zeros_like(rgb), "rgb_clear_clamp": torch.zeros_like(rgb), "rgb_medium": medium_rgb, "pred_image": rgb,
-                    "medium_rgb": medium_rgb, "medium_bs": medium_bs, "medium_attn": medium_attn}
+            rgb = torch.zeros(H, W, 3, device=self.device)
+            depth = rgb.new_ones(H, W, 1) * 10
+            accumulation = rgb.new_zeros(H, W, 1)
+            return {
+                "rgb": rgb,
+                "depth": depth,
+                "accumulation": accumulation,
+                "background": rgb,
+                "rgb_object": torch.zeros_like(rgb),
+                "rgb_clear": torch.zeros_like(rgb),
+                "rgb_clear_clamp": torch.zeros_like(rgb),
+                "rgb_medium": rgb,
+                "pred_image": rgb,
+                "medium_rgb": medium_rgb,
+                "medium_bs": medium_bs,
+                "medium_attn": medium_attn,
+            }
 
         if self.training:
             self.xys.retain_grad()
@@ -1012,7 +886,7 @@ class HashWaterSplattingModel(Model):
             H,
             W,
             BLOCK_WIDTH,
-            background=medium_rgb.mean(dim=(0,1)),
+            background=medium_rgb,
             return_alpha=True,
             step=self.step,
         )  # type: ignore
@@ -1064,19 +938,21 @@ class HashWaterSplattingModel(Model):
         metrics_dict = {}
         predicted_rgb = outputs["pred_image"]
         predicted_rgb = torch.clamp(predicted_rgb, 0.0, 1.0)
-
-        # metrics_dict["psnr"] = self.psnr(predicted_rgb, gt_rgb)
-        if predicted_rgb.shape == gt_rgb.shape:
-            metrics_dict["psnr"] = self.psnr(predicted_rgb, gt_rgb)
-        else:
-            metrics_dict["psnr"] = torch.tensor(0.0, device=predicted_rgb.device)
+        metrics_dict["psnr"] = self.psnr(predicted_rgb, gt_rgb)
 
         metrics_dict["gaussian_count"] = self.num_points
+        medium_attn = outputs["medium_attn"]
+        medium_bs = outputs["medium_bs"]
+        medium_rgb = outputs["medium_rgb"]
         for i in range(3):
-            # medium tensors are (N, 3) — per-Gaussian, not per-pixel
-            metrics_dict[f"medium_attn_{i}"] = outputs["medium_attn"][:, i].mean()
-            metrics_dict[f"medium_bs_{i}"] = outputs["medium_bs"][:, i].mean()
-            metrics_dict[f"medium_rgb_{i}"] = outputs["medium_rgb"][:, i].mean()
+            if medium_attn.ndim == 3:
+                metrics_dict[f"medium_attn_{i}"] = medium_attn[:, :, i].mean()
+                metrics_dict[f"medium_bs_{i}"] = medium_bs[:, :, i].mean()
+                metrics_dict[f"medium_rgb_{i}"] = medium_rgb[:, :, i].mean()
+            else:
+                metrics_dict[f"medium_attn_{i}"] = medium_attn[:, i].mean()
+                metrics_dict[f"medium_bs_{i}"] = medium_bs[:, i].mean()
+                metrics_dict[f"medium_rgb_{i}"] = medium_rgb[:, i].mean()
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
@@ -1089,10 +965,6 @@ class HashWaterSplattingModel(Model):
         """
         gt_img = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
         pred_img = outputs["pred_image"]
-
-        # Guard against shape mismatch during early training eval steps
-        if gt_img.shape != pred_img.shape:
-            return {"main_loss": torch.tensor(0.0, device=pred_img.device, requires_grad=True)}
 
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
@@ -1116,9 +988,16 @@ class HashWaterSplattingModel(Model):
         else:
             simloss = 1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...])
 
-        return {
+        loss_dict = {
             "main_loss": (1 - self.config.ssim_lambda) * recon_loss + self.config.ssim_lambda * simloss,
         }
+        if self.config.beta_b_proportion_weight > 0.0:
+            beta_b_act = self.sigma_activation(
+                self.hash_medium(self.means)[:, 3:6] + self.medium_density_bias
+            )
+            excess = torch.relu(beta_b_act.mean() - self.config.beta_b_proportion_ceiling)
+            loss_dict["beta_b_proportion"] = excess * self.config.beta_b_proportion_weight
+        return loss_dict
 
     @torch.no_grad()
     def get_outputs_for_camera(self, camera: Cameras, obb_box: Optional[OrientedBox] = None) -> Dict[str, torch.Tensor]:
@@ -1152,23 +1031,6 @@ class HashWaterSplattingModel(Model):
         predicted_rgb = outputs["pred_image"]
         predicted_rgb = torch.clamp(predicted_rgb, 0.0, 1.0)
 
-        # if predicted_rgb.shape != gt_rgb.shape:
-        #     metrics_dict = {"psnr": 0.0, "ssim": 0.0, "lpips": 1.0}
-        #     images_dict = {"gt": gt_rgb.cpu(), "rgb": predicted_rgb}
-        #     return metrics_dict, images_dict
-        if predicted_rgb.shape != gt_rgb.shape:
-            dummy = torch.zeros_like(gt_rgb)
-            metrics_dict = {"psnr": 0.0, "ssim": 0.0, "lpips": 1.0}
-            images_dict = {
-                "gt": dummy.cpu(),
-                "rgb": dummy.cpu(),
-                "rgb_medium": dummy.cpu(),
-                "rgb_object": dummy.cpu(),
-                "depth": dummy.cpu(),
-                "rgb_clear": dummy.cpu(),
-            }
-            return metrics_dict, images_dict
-        # d = self._get_downscale_factor()
         d = self._get_downscale_factor()
         if d > 1:
             # torchvision can be slow to import, so we do it lazily.

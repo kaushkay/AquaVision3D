@@ -6,10 +6,36 @@ from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataPars
 from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from nerfstudio.engine.optimizers import AdamOptimizerConfig
 from nerfstudio.configs.base_config import ViewerConfig
+
 from water_splatting.hash_water_splatting import HashWaterSplattingModelConfig
 
-NUM_STEPS = 15000
-# Base method configuration
+MAX_TRAIN_STEPS = 15000
+
+
+def _exp_decay(lr_final: float, warmup_steps: int = 0) -> ExponentialDecaySchedulerConfig:
+    return ExponentialDecaySchedulerConfig(
+        lr_final=lr_final,
+        max_steps=MAX_TRAIN_STEPS,
+        warmup_steps=warmup_steps,
+    )
+
+
+def _default_optimizers() -> dict:
+    return {
+        "means": {"optimizer": AdamOptimizerConfig(lr=1.6e-4, eps=1e-15), "scheduler": _exp_decay(lr_final=5e-05)},
+        "features_dc": {"optimizer": AdamOptimizerConfig(lr=0.0025, eps=1e-15), "scheduler": _exp_decay(lr_final=0.0025)},
+        "features_rest": {"optimizer": AdamOptimizerConfig(lr=0.000125, eps=1e-15), "scheduler": _exp_decay(lr_final=0.000125)},
+        "opacities": {"optimizer": AdamOptimizerConfig(lr=0.05, eps=1e-15), "scheduler": _exp_decay(lr_final=0.05)},
+        "scales": {"optimizer": AdamOptimizerConfig(lr=0.005, eps=1e-15), "scheduler": _exp_decay(lr_final=0.005)},
+        "quats": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), "scheduler": _exp_decay(lr_final=0.001)},
+        "camera_opt": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), "scheduler": _exp_decay(lr_final=5e-05)},
+        "hash_medium": {
+            "optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15, max_norm=0.001),
+            "scheduler": _exp_decay(lr_final=0.00015, warmup_steps=500),
+        },
+    }
+
+
 hash_water_splatting_method = MethodSpecification(
     config=TrainerConfig(
         method_name="hash-water-splatting",
@@ -17,76 +43,24 @@ hash_water_splatting_method = MethodSpecification(
         steps_per_eval_batch=0,
         steps_per_save=2000,
         steps_per_eval_all_images=1000,
-        max_num_iterations=NUM_STEPS,
+        max_num_iterations=MAX_TRAIN_STEPS,
         mixed_precision=False,
         pipeline=VanillaPipelineConfig(
             datamanager=FullImageDatamanagerConfig(
                 dataparser=NerfstudioDataParserConfig(load_3D_points=True),
             ),
             model=HashWaterSplattingModelConfig(
-                num_steps=NUM_STEPS,
-                main_loss="reg_l1",
+                num_steps=MAX_TRAIN_STEPS,
+                main_loss="l1",
                 ssim_loss="reg_ssim",
                 zero_medium=False,
-                                          ),
+            ),
         ),
-        optimizers={
-            "means": {
-                "optimizer": AdamOptimizerConfig(lr=1.6e-4, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=5e-5,
-                    max_steps=NUM_STEPS,
-                ),
-            },
-            "features_dc": {
-                "optimizer": AdamOptimizerConfig(lr=0.0025, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=0.0025,
-                    max_steps=NUM_STEPS,
-                ),
-            },
-            "features_rest": {
-                "optimizer": AdamOptimizerConfig(lr=0.0025 / 20, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=0.0025 / 20,
-                    max_steps=NUM_STEPS,
-                ),
-            },
-            "opacities": {
-                "optimizer": AdamOptimizerConfig(lr=0.05, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=0.05,
-                    max_steps=NUM_STEPS,
-                ),
-            },
-            "scales": {
-                "optimizer": AdamOptimizerConfig(lr=0.005, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=0.005,
-                    max_steps=NUM_STEPS,
-                ),
-            },
-            "quats": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), 
-                      "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=0.001,
-                    max_steps=NUM_STEPS,
-                ),
-            },
-            "camera_opt": {
-                "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(lr_final=5e-5, max_steps=NUM_STEPS),
-            },
-            "hash_medium": {
-                "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=1.5e-4, max_steps=NUM_STEPS,
-                ),
-            },
-        },
-        viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+        optimizers=_default_optimizers(),
+        viewer=ViewerConfig(num_rays_per_chunk=32768),
         vis="viewer",
     ),
-    description="Water-Splatting for underwater scenes.",
+    description="Hash-water-splatting: 3DGS with spatial hash-grid medium.",
 )
 
 hash_water_splatting_method_big = MethodSpecification(
@@ -96,57 +70,29 @@ hash_water_splatting_method_big = MethodSpecification(
         steps_per_eval_batch=0,
         steps_per_save=2000,
         steps_per_eval_all_images=1000,
-        max_num_iterations=NUM_STEPS,
+        max_num_iterations=MAX_TRAIN_STEPS,
         mixed_precision=False,
         pipeline=VanillaPipelineConfig(
             datamanager=FullImageDatamanagerConfig(
                 dataparser=NerfstudioDataParserConfig(load_3D_points=True),
             ),
             model=HashWaterSplattingModelConfig(
-                num_steps=NUM_STEPS,
+                num_steps=MAX_TRAIN_STEPS,
                 continue_cull_post_densification=False,
             ),
         ),
         optimizers={
-            "means": {
-                "optimizer": AdamOptimizerConfig(lr=1.6e-4, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=5e-5,
-                    max_steps=NUM_STEPS,
-                ),
-            },
-            "features_dc": {
-                "optimizer": AdamOptimizerConfig(lr=0.0025, eps=1e-15),
-                "scheduler": None,
-            },
-            "features_rest": {
-                "optimizer": AdamOptimizerConfig(lr=0.0025 / 20, eps=1e-15),
-                "scheduler": None,
-            },
-            "opacities": {
-                "optimizer": AdamOptimizerConfig(lr=0.05, eps=1e-15),
-                "scheduler": None,
-            },
-            "scales": {
-                "optimizer": AdamOptimizerConfig(lr=0.005, eps=1e-15),
-                "scheduler": None,
-            },
-            "quats": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), "scheduler": None},
-            "camera_opt": {
-                "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=5e-5, max_steps=NUM_STEPS,
-                    ),
-            },
-            "hash_medium": {
-                "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=1.5e-4, max_steps=NUM_STEPS,
-                ),
+            **_default_optimizers(),
+            **{
+                "features_dc": {"optimizer": AdamOptimizerConfig(lr=0.0025, eps=1e-15), "scheduler": None},
+                "features_rest": {"optimizer": AdamOptimizerConfig(lr=0.000125, eps=1e-15), "scheduler": None},
+                "opacities": {"optimizer": AdamOptimizerConfig(lr=0.05, eps=1e-15), "scheduler": None},
+                "scales": {"optimizer": AdamOptimizerConfig(lr=0.005, eps=1e-15), "scheduler": None},
+                "quats": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), "scheduler": None},
             },
         },
-        viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+        viewer=ViewerConfig(num_rays_per_chunk=32768),
         vis="viewer",
     ),
-    description="Water-Splatting big for underwater scenes.",
+    description="Hash-water-splatting (larger capacity) with spatial hash-grid medium.",
 )

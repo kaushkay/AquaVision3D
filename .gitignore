@@ -120,3 +120,22 @@ venv.bak/
 *build
 compile_commands.json
 *.dump
+
+# Local training / eval artifacts
+outputs/
+renders/
+docs/
+scripts/
+*.ckpt
+events.out.tfevents*
+output.json
+*.log
+
+# Vendor archives (use git submodule for glm)
+*.zip
+water_splatting/cuda/csrc/third_party/**/*.zip
+
+# Editor / OS
+.idea/
+*.swp
+Thumbs.db
