@@ -127,3 +127,19 @@ rasterizer.
   year={2025}
 }
 ```
+
+## Citation
+
+If you use AquaVision3D in your work, please cite:
+
+```bibtex
+@inproceedings{giri2026aquavision3d,
+  title={{AquaVision3D}: Physically-Consistent Medium Modelling
+         for Underwater {Gaussian Splatting}},
+  author={Giri, Kaushlendra Kumar and Bian, Shaojun and
+          Ihmeida, Mohamed and Wu, Yun and Tharib, Safa},
+  booktitle={Proceedings of the European Conference on Computer
+             Vision (ECCV) Workshops},
+  year={2026}
+}
+```
