@@ -124,7 +124,6 @@ compile_commands.json
 # Local training / eval artifacts
 outputs/
 renders/
-docs/
 scripts/
 *.ckpt
 events.out.tfevents*
