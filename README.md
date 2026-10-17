@@ -1,5 +1,11 @@
 # AquaVision3D
 
+**UniWorld Workshop, ECCV 2026** ·
+[Project Page](https://kaushkay.github.io/AquaVision3D/) ·
+[Paper](https://openreview.net/attachment?id=u9UwMP2u33&name=Final_Version) ·
+[Supplementary](https://openreview.net/attachment?id=u9UwMP2u33&name=Supplementary_Material) ·
+[OpenReview](https://openreview.net/forum?id=u9UwMP2u33)
+
 Underwater 3D reconstruction with a **spatial hash-grid medium** on top of
 [WaterSplatting](https://water-splatting.github.io/) (Li et al., 3DV 2025).
 
